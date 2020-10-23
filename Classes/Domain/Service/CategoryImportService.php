@@ -72,49 +72,68 @@ class CategoryImportService extends AbstractImportService {
 	 * @param array $importArray
 	 * @return void
 	 */
-	public function import(array $importArray) {
+	public function import(array $importArray)
+	{
 		$this->logger->info(sprintf('Starting import for %s categories', count($importArray)));
 
 		// Sort import array to import the default language first
 		foreach ($importArray as $importItem) {
 			$category = $this->hydrateCategory($importItem);
 
-			if (!empty($importItem['title_lang_ol'])) {
-				$this->postPersistQueue[$importItem['import_id']] = array(
+			if (!empty($importItem['title_lang_ol']) && !$importItem['parentcategory']) {
+				$postPersistQueueLanguage[$importItem['import_id']] = [
 					'category' => $category,
 					'importItem' => $importItem,
-					'action' => self::ACTION_CREATE_L10N_CHILDREN_CATEGORY,
 					'titleLanguageOverlay' => $importItem['title_lang_ol']
-				);
+				];
 			}
 
-			if ($importItem['parentcategory']) {
-				$this->postPersistQueue[$importItem['import_id']] = array(
+			if ($importItem['parentcategory'] && empty($importItem['title_lang_ol'])) {
+				$postPersistQueueParent[$importItem['import_id']] = [
 					'category' => $category,
-					'action' => self::ACTION_SET_PARENT_CATEGORY,
 					'parentCategoryOriginUid' => $importItem['parentcategory']
-				);
+				];
+			}
+
+			if ($importItem['parentcategory'] && !empty($importItem['title_lang_ol'])) {
+				$postPersistQueueParentAndLanguage[$importItem['import_id']] = [
+					'category' => $category,
+					'importItem' => $importItem,
+					'parentCategoryOriginUid' => $importItem['parentcategory'],
+					'titleLanguageOverlay' => $importItem['title_lang_ol']
+				];
 			}
 		}
 
 		$this->persistenceManager->persistAll();
 
-		foreach ($this->postPersistQueue as $queueItem) {
-			switch ($queueItem['action']) {
-				case self::ACTION_SET_PARENT_CATEGORY:
-					$this->setParentCategory($queueItem);
-					break;
-				case self::ACTION_CREATE_L10N_CHILDREN_CATEGORY:
-					$this->createL10nChildrenCategory($queueItem);
-					break;
-				default:
-					// do nothing
-					break;
-			}
-
+		foreach ($postPersistQueueLanguage as $queueItem) {
+			$this->createL10nChildrenCategory($queueItem);
 		}
 
 		$this->persistenceManager->persistAll();
+
+		foreach ($postPersistQueueParent as $queueItem) {
+			$this->setParentCategory($queueItem);
+		}
+
+		foreach ($postPersistQueueParentAndLanguage as $queueItem) {
+			$this->createL10nChildrenCategory($queueItem);
+		}
+
+		$this->persistenceManager->persistAll();
+
+		foreach ($postPersistQueueParentAndLanguage as $queueItem) {
+			$this->setParentCategory($queueItem);
+		}
+
+		$this->persistenceManager->persistAll();
+
+		//Since the translated categories still don't have the right parent after this, correct this manually.
+		//Category parent should be the same as the non-translated record, so we can solve this with our own query:
+		$GLOBALS['TYPO3_DB']->sql_query('
+			UPDATE sys_category AS lang JOIN sys_category AS orig ON lang.l10n_parent = orig.uid SET lang.parent = orig.parent WHERE lang.l10n_parent <> 0 AND lang.parent = 0;
+		');
 	}
 
 	/**
@@ -233,12 +252,10 @@ class CategoryImportService extends AbstractImportService {
 		$category = $queueItem['category'];
 		$parentCategoryOriginUid = $queueItem['parentCategoryOriginUid'];
 
-		if (is_null($parentCategory = $this->postPersistQueue[$parentCategoryOriginUid]['category'])) {
-			$parentCategory = $this->categoryRepository->findOneByImportSourceAndImportId(
-				$category->getImportSource(),
-				$parentCategoryOriginUid
-			);
-		}
+		$parentCategory = $this->categoryRepository->findOneByImportSourceAndImportId(
+			$category->getImportSource(),
+			$parentCategoryOriginUid
+		);
 
 		if ($parentCategory !== NULL) {
 			$category->setParentcategory($parentCategory);
